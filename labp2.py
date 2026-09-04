@@ -113,8 +113,8 @@ def align(seqA,seqB, alignment_type):
             else:
                 S[i,j] = max(0, match_mismatch, insert, gap) #local can go back to 0
             #so now to set up the values for following the optimal path
-            if alignment_type == 0 and 0>= max(match_mismatch, insert, gap):
-                trace[i,j,:] = (0.,0.,0.,) #we're saying that the optimal local alignment restarts at this spot because we don't want any negative values
+            if alignment_type == 0 and 0>= max(match_mismatch, insert, gap): 
+                trace[i,j,:] = (0.,0.,0.) #we're saying that the optimal local alignment restarts at this spot because we don't want any negative values
             elif match_mismatch >= max(insert, gap):
                 trace[i,j,:] = (1.,0.,0.) # TFF for match/mismatch
             elif insert >= max(match_mismatch, gap):
@@ -128,7 +128,7 @@ def align(seqA,seqB, alignment_type):
     return S, trace, score_of_the_alignment #later on the formatting fucniton i think would have to have a specified start_from for local??
 
 
-#EXCERCISE 2 - really dont know if thi is correct and don't know how to check (same with above one tbh)
+#EXCERCISE 2 - really dont know if this is correct and don't know how to check (same with above one tbh)
 #gap penalty would be different now
 new_gap = -3
 cont_gap = -1
@@ -140,7 +140,7 @@ cont_gap = -1
 #i don't understand
 #https://github.com/biopython/biopython/blob/master/Bio/pairwise2.py didn't help that much actually
 def initiate_affine_dp(m,n,alignment_type):
-    Mij = np.zeros((m+1, n+1)) 
+    Mij = np.zeros((m+1, n+1)) #not sure if these are correct
     Xij = np.zeros((m+1, n+1)) 
     Yij = np.zeros((m+1, n+1))
     trace_Mij = np.zeros((m+1, n+1, 3), dtype=np.bool)
@@ -149,18 +149,102 @@ def initiate_affine_dp(m,n,alignment_type):
 
     Mij[0,0] = 0
     # these are other layers so idk if you can initilaize with 0 since this is if there is a gap in seq A or B??
-    Xij[0,0] = 0
-    Yij[0,0] = 0
-#i dont get it so im pausing for now
+    Xij[0,0] = None
+    Yij[0,0] = None
+
+    if alignment_type == 1: #global
+        for i in range(1,m+1): 
+            Xij[i,0] = new_gap() + ((i-1) * cont_gap()) #i-1 b/c we need no continued gap at first, just the new gap 
+            trace_Xij[i,0,:] = (0.,0.,1) # FFT = true at position 2 (index thing) means gap. needleman is intiialized with gaps so yeah
+        for j in range(1,n+1):
+            Yij[0,j] = new_gap() + ((j-1) * cont_gap())
+            trace_Yij[0,j,:] = (0.,1.,0) #just the same as above ig? imagining new gap and then being continued just horizontally? (or insertions?)
+            #ot sure where Mij comes into play here??
+    else: #local
+        for i in range(1, m+1): 
+            Mij[i,0] = 0.
+            trace_Mij[i,0,:] = (0.,0.,0.)
+        for j in range(1, n+1):
+            Mij[0,j] = 0.
+            trace_Mij[0,j,:] = (0.,0.,0.)
+    # Return the initiated matrices
+    return Mij, Xij, Yij, trace_Mij, trace_Xij, trace_Yij
 # apparently needle is the only one who initializes corrrectly and i cant figure out how - embAlignPathCalcWithEndGapPenalties
 
+def affine_align(seqA,seqB, alignment_type):
+    # Initiating variables
+    m, n = len(seqA), len(seqB) 
+    Mij, Xij, Yij,trace_Mij, trace_Xij, trace_Yij = initiate_affine_dp(m,n,alignment_type)
+    for i in range(1,m+1):
+        for j in range(1,n+1): #lets up go through the whole matrix. so when we are on row 1 we go through every column (left to right and then down and repeat)
+            #three matrices/routes to consider?
 
+            #so if previous was a match/mismatch - M represents match/mismatch so it is the focus here?
+            previous = (Mij[i-1,j-1], Xij[i-1,j-1], Yij[i-1,j-1]) #calling all previous possibilities
+            best_previous = max(previous)
+            Mij[i,j] = best_previous + match_score[seqA[i-1],seqB[j-1]]
+            
+            if alignment_type == 0: #local
+                Mij[i,j] = max(0., best_previous + match_score[seqA[i-1],seqB[j-1]])
+            elif alignment_type == 0 and Mij[i,j] <= 0: 
+                trace_Mij[i,j,:] = (0.,0.,0.)
+            elif alignment_type == 1 and previous[0] >= max(previous[1], previous[2]): # global - if new match/mismatch
+                trace_Mij = (1.,0.,0.)
+            elif alignment_type == 1 and previous[1] >= max(previous[0], previous[2]): # global - if new gap
+                trace_Mij = (0.,0.,1.)
+            elif alignment_type == 1 and previous[2] >= max(previous[0], previous[1]): # global - if new insert
+                trace_Mij = (0.,1.,0.)
+            else:
+                print('something went wrong M')
 
+            #Xij now - previous was a gap (in seqA -> i)
+            Xij_ext_A = Xij[i-1,j-1] + cont_gap
+            #others would be new gap
+            Mij_new_A = Mij[i-1,j-1] + new_gap
+            Yij_new_A = Yij[i-1,j-1] + new_gap
+            #so we have the three possible routes now?
+            Xij[i,j] = max(Xij_ext_A, Mij_new_A, Yij_new_A)
 
+            if alignment_type == 0: #local
+                Xij[i,j] = max(0., max(Xij_ext_A, Mij_new_A, Yij_new_A))
+            elif alignment_type == 0 and Xij[i,j] <= 0: 
+                trace_Xij[i,j,:] = (0.,0.,0.)
+            elif alignment_type == 1 and Xij_ext_A >= max(Mij_new_A, Yij_new_A): # global - if new match/mismatch
+                trace_Xij = (0.,1.,0.)
+            elif alignment_type == 1 and Mij_new_A >= max(Xij_ext_A, Yij_new_A): # global - if new gap
+                trace_Xij = (1.,0.,0.)
+            elif alignment_type == 1 and Yij_new_A >= max(Mij_new_A, Xij_ext_A): # global - if new insert
+                trace_Xij = (0.,0.,1.)
+            else:
+                print('something went wrong X')
 
+            #Yij now - previous was an insert (in seqA -> i) - so gap in B
+            Yij_ext_B = Yij[i-1,j-1] + cont_gap
+            #others would be new gap
+            Mij_new_B = Mij[i-1,j-1] + new_gap
+            Xij_new_B = Xij[i-1,j-1] + new_gap
+            #so we have the three possible routes now?
+            Yij[i,j] = max(Xij_ext_A, Mij_new_A, Yij_new_A)
 
+            if alignment_type == 0: #local
+                Yij[i,j] = max(0., max(Yij_ext_B, Mij_new_B, Xij_new_B))
+            elif alignment_type == 0 and Xij[i,j] <= 0: 
+                trace_Yij[i,j,:] = (0.,0.,0.)
+            elif alignment_type == 1 and Yij_ext_B >= max(Mij_new_B, Xij_new_B): # global - if new match/mismatch
+                trace_Yij = (0.,1.,0.)
+            elif alignment_type == 1 and Mij_new_B >= max(Yij_ext_B, Xij_new_B): # global - if new gap
+                trace_Yij = (1.,0.,0.)
+            elif alignment_type == 1 and Xij_new_B >= max(Mij_new_B, Yij_ext_B): # global - if new insert
+                trace_Yij = (0.,0.,1.)
+            else:
+                print('something went wrong Y')
 
-
+    if alignment_type == 1: #global
+        score_of_the_alignment = max(Mij[m,n],Xij[m,n],Yij[m,n]) #should be the last cell for needleman
+    else: # local
+        score_of_the_alignment = np.max(Mij[m,n],Xij[m,n],Yij[m,n])
+    return Mij, Xij, Yij, trace_Mij, trace_Xij, trace_Yij #no idea how to test this
+ 
 
 #sources
 #the textbook given and that's about it
