@@ -139,9 +139,16 @@ cont_gap = -1
 # infinity starts coming into play (silde 12) so ig i gotta keep that in mind
 #i don't understand
 #https://github.com/biopython/biopython/blob/master/Bio/pairwise2.py didn't help that much actually
+
+# Conventions used below (same as the trace layers in the exercises above):
+#   Mij[i,j] : best score where a_i is aligned to b_j            (diagonal move)
+#   Xij[i,j] : best score where a_i is aligned to a gap          (vertical move, "delete",  trace index 2)
+#   Yij[i,j] : best score where b_j is aligned to a gap          (horizontal move, "insert", trace index 1)
+# In the affine case each trace layer records WHICH MATRIX the predecessor came from:
+#   (T,F,F) = came from M,  (F,T,F) = came from Y,  (F,F,T) = came from X
 def initiate_affine_dp(m,n,alignment_type):
     Mij = np.zeros((m+1, n+1)) #not sure if these are correct
-    Xij = np.zeros((m+1, n+1)) 
+    Xij = np.zeros((m+1, n+1))
     Yij = np.zeros((m+1, n+1))
     trace_Mij = np.zeros((m+1, n+1, 3), dtype=np.bool)
     trace_Xij = np.zeros((m+1, n+1, 3), dtype=np.bool)
@@ -149,102 +156,119 @@ def initiate_affine_dp(m,n,alignment_type):
 
     Mij[0,0] = 0
     # these are other layers so idk if you can initilaize with 0 since this is if there is a gap in seq A or B??
-    Xij[0,0] = None
-    Yij[0,0] = None
+    # FIX: "impossible" is -inf, not None (None becomes NaN in a float array, and max()
+    #      with NaN gives silent nonsense). At (0,0) nothing has been consumed, so you
+    #      cannot be in the middle of a gap.
+    Xij[0,0] = -np.inf
+    Yij[0,0] = -np.inf
 
     if alignment_type == 1: #global
-        for i in range(1,m+1): 
-            Xij[i,0] = new_gap() + ((i-1) * cont_gap()) #i-1 b/c we need no continued gap at first, just the new gap 
-            trace_Xij[i,0,:] = (0.,0.,1) # FFT = true at position 2 (index thing) means gap. needleman is intiialized with gaps so yeah
+        for i in range(1,m+1):
+            # FIX: new_gap and cont_gap are numbers, not functions -> no ()
+            Xij[i,0] = new_gap + ((i-1) * cont_gap) #i-1 b/c we need no continued gap at first, just the new gap
+            # FIX: the first gap comes from M[0,0]; the following ones extend X
+            trace_Xij[i,0,:] = (1,0,0) if i == 1 else (0,0,1)
+            # FIX: the rest of column 0 can NOT be reached: you cannot have aligned a_i to
+            #      b_0 (M) or be in a horizontal gap (Y) when nothing of B is consumed yet.
+            #      Leaving these at 0 lets the recursion "start for free" from the border.
+            Mij[i,0] = -np.inf
+            Yij[i,0] = -np.inf
         for j in range(1,n+1):
-            Yij[0,j] = new_gap() + ((j-1) * cont_gap())
-            trace_Yij[0,j,:] = (0.,1.,0) #just the same as above ig? imagining new gap and then being continued just horizontally? (or insertions?)
-            #ot sure where Mij comes into play here??
+            Yij[0,j] = new_gap + ((j-1) * cont_gap)
+            trace_Yij[0,j,:] = (1,0,0) if j == 1 else (0,1,0)
+            Mij[0,j] = -np.inf   # FIX: same for row 0
+            Xij[0,j] = -np.inf
     else: #local
-        for i in range(1, m+1): 
+        for i in range(1, m+1):
             Mij[i,0] = 0.
             trace_Mij[i,0,:] = (0.,0.,0.)
         for j in range(1, n+1):
             Mij[0,j] = 0.
             trace_Mij[0,j,:] = (0.,0.,0.)
+        # (Xij/Yij borders can stay 0 here: a local alignment starting with a gap is
+        #  never better than starting at the 0 in Mij, so it never wins.)
     # Return the initiated matrices
     return Mij, Xij, Yij, trace_Mij, trace_Xij, trace_Yij
-# apparently needle is the only one who initializes corrrectly and i cant figure out how - embAlignPathCalcWithEndGapPenalties
+
+# FIX: small helper so the "which of the three did we come from" logic is written once.
+# candidates are given in the order (from M, from Y, from X) so that the argmax
+# index is directly the trace layer index.
+def _best(from_M, from_Y, from_X):
+    cands = (from_M, from_Y, from_X)
+    k = int(np.argmax(cands))
+    tr = [0,0,0]
+    tr[k] = 1
+    return cands[k], tuple(tr)
 
 def affine_align(seqA,seqB, alignment_type):
     # Initiating variables
-    m, n = len(seqA), len(seqB) 
+    m, n = len(seqA), len(seqB)
     Mij, Xij, Yij,trace_Mij, trace_Xij, trace_Yij = initiate_affine_dp(m,n,alignment_type)
     for i in range(1,m+1):
-        for j in range(1,n+1): #lets up go through the whole matrix. so when we are on row 1 we go through every column (left to right and then down and repeat)
-            #three matrices/routes to consider?
+        for j in range(1,n+1):
+            # M: a_i aligned to b_j. Predecessor is the diagonal cell in ANY of the three matrices.
+            # FIX: match_score is a function -> () not []
+            s = match_score(seqA[i-1],seqB[j-1])
+            Mij[i,j], tr = _best(Mij[i-1,j-1] + s, Yij[i-1,j-1] + s, Xij[i-1,j-1] + s)
+            if alignment_type == 0 and Mij[i,j] <= 0: #local can restart here
+                Mij[i,j] = 0.
+                tr = (0,0,0)
+            # FIX: assign INTO the array (trace_Mij[i,j,:] = ...), not trace_Mij = ...
+            #      (the old code replaced the whole matrix by a tuple)
+            trace_Mij[i,j,:] = tr
 
-            #so if previous was a match/mismatch - M represents match/mismatch so it is the focus here?
-            previous = (Mij[i-1,j-1], Xij[i-1,j-1], Yij[i-1,j-1]) #calling all previous possibilities
-            best_previous = max(previous)
-            Mij[i,j] = best_previous + match_score[seqA[i-1],seqB[j-1]]
-            
-            if alignment_type == 0: #local
-                Mij[i,j] = max(0., best_previous + match_score[seqA[i-1],seqB[j-1]])
-            elif alignment_type == 0 and Mij[i,j] <= 0: 
-                trace_Mij[i,j,:] = (0.,0.,0.)
-            elif alignment_type == 1 and previous[0] >= max(previous[1], previous[2]): # global - if new match/mismatch
-                trace_Mij = (1.,0.,0.)
-            elif alignment_type == 1 and previous[1] >= max(previous[0], previous[2]): # global - if new gap
-                trace_Mij = (0.,0.,1.)
-            elif alignment_type == 1 and previous[2] >= max(previous[0], previous[1]): # global - if new insert
-                trace_Mij = (0.,1.,0.)
-            else:
-                print('something went wrong M')
+            # X: a_i aligned to a gap.
+            # FIX: the predecessor is the cell ABOVE, [i-1, j] -- not [i-1, j-1].
+            #      A vertical gap only consumes a character from seqA.
+            Xij[i,j], trace_Xij[i,j,:] = _best(Mij[i-1,j] + new_gap,
+                                              Yij[i-1,j] + new_gap,
+                                              Xij[i-1,j] + cont_gap)
 
-            #Xij now - previous was a gap (in seqA -> i)
-            Xij_ext_A = Xij[i-1,j-1] + cont_gap
-            #others would be new gap
-            Mij_new_A = Mij[i-1,j-1] + new_gap
-            Yij_new_A = Yij[i-1,j-1] + new_gap
-            #so we have the three possible routes now?
-            Xij[i,j] = max(Xij_ext_A, Mij_new_A, Yij_new_A)
-
-            if alignment_type == 0: #local
-                Xij[i,j] = max(0., max(Xij_ext_A, Mij_new_A, Yij_new_A))
-            elif alignment_type == 0 and Xij[i,j] <= 0: 
-                trace_Xij[i,j,:] = (0.,0.,0.)
-            elif alignment_type == 1 and Xij_ext_A >= max(Mij_new_A, Yij_new_A): # global - if new match/mismatch
-                trace_Xij = (0.,1.,0.)
-            elif alignment_type == 1 and Mij_new_A >= max(Xij_ext_A, Yij_new_A): # global - if new gap
-                trace_Xij = (1.,0.,0.)
-            elif alignment_type == 1 and Yij_new_A >= max(Mij_new_A, Xij_ext_A): # global - if new insert
-                trace_Xij = (0.,0.,1.)
-            else:
-                print('something went wrong X')
-
-            #Yij now - previous was an insert (in seqA -> i) - so gap in B
-            Yij_ext_B = Yij[i-1,j-1] + cont_gap
-            #others would be new gap
-            Mij_new_B = Mij[i-1,j-1] + new_gap
-            Xij_new_B = Xij[i-1,j-1] + new_gap
-            #so we have the three possible routes now?
-            Yij[i,j] = max(Xij_ext_A, Mij_new_A, Yij_new_A)
-
-            if alignment_type == 0: #local
-                Yij[i,j] = max(0., max(Yij_ext_B, Mij_new_B, Xij_new_B))
-            elif alignment_type == 0 and Xij[i,j] <= 0: 
-                trace_Yij[i,j,:] = (0.,0.,0.)
-            elif alignment_type == 1 and Yij_ext_B >= max(Mij_new_B, Xij_new_B): # global - if new match/mismatch
-                trace_Yij = (0.,1.,0.)
-            elif alignment_type == 1 and Mij_new_B >= max(Yij_ext_B, Xij_new_B): # global - if new gap
-                trace_Yij = (1.,0.,0.)
-            elif alignment_type == 1 and Xij_new_B >= max(Mij_new_B, Yij_ext_B): # global - if new insert
-                trace_Yij = (0.,0.,1.)
-            else:
-                print('something went wrong Y')
+            # Y: b_j aligned to a gap.
+            # FIX: the predecessor is the cell to the LEFT, [i, j-1].
+            # FIX: the old global branch filled Yij with X's candidates (copy/paste).
+            Yij[i,j], trace_Yij[i,j,:] = _best(Mij[i,j-1] + new_gap,
+                                              Yij[i,j-1] + cont_gap,
+                                              Xij[i,j-1] + new_gap)
 
     if alignment_type == 1: #global
         score_of_the_alignment = max(Mij[m,n],Xij[m,n],Yij[m,n]) #should be the last cell for needleman
     else: # local
-        score_of_the_alignment = np.max(Mij[m,n],Xij[m,n],Yij[m,n])
-    return Mij, Xij, Yij, trace_Mij, trace_Xij, trace_Yij #no idea how to test this
- 
+        # FIX: np.max(a, b, c) means np.max(a, axis=b, out=c). Local score = best cell in M.
+        score_of_the_alignment = np.max(Mij)
+    # FIX: the score was computed but never returned
+    return Mij, Xij, Yij, trace_Mij, trace_Xij, trace_Yij, score_of_the_alignment
+
+# FIX (new): traceback for the affine case. format_alignment() above only knows one trace
+# layer; here we also have to remember which matrix we are currently in.
+def format_affine_alignment(seqA, seqB, M, X, Y, trace_M, trace_X, trace_Y, start_from=None):
+    if start_from:                 # local: (i, j) of the best cell in M
+        i, j = start_from
+        cur = 0
+    else:                          # global: end cell, in whichever matrix holds the best score
+        i, j = len(seqA), len(seqB)
+        cur = int(np.argmax((M[i,j], Y[i,j], X[i,j])))   # 0 = M, 1 = Y, 2 = X
+    traces = (trace_M, trace_Y, trace_X)
+    outA, outB = "", ""
+    while i > 0 or j > 0:
+        tr = traces[cur][i,j]
+        if not tr.any():        # local alignment start
+            break
+        nxt = int(np.argmax(tr))   # which matrix the predecessor is in
+        if cur == 0:               # in M: consume both
+            i, j = i-1, j-1
+            outA = seqA[i] + outA
+            outB = seqB[j] + outB
+        elif cur == 1:             # in Y: gap in A, consume b_j
+            j = j-1
+            outA = "-" + outA
+            outB = seqB[j] + outB
+        else:                      # in X: gap in B, consume a_i
+            i = i-1
+            outA = seqA[i] + outA
+            outB = "-" + outB
+        cur = nxt
+    return outA, outB
 
 #sources
 #the textbook given and that's about it
@@ -353,3 +377,11 @@ if __name__ == "__main__":
     pretty_trace_arrows(trace) 
     #print('\n'.join(format_alignment(seqA, seqB, trace)))
     print(f"Score: {max_score}")
+
+    # FIX (new): a small test of the affine version. With open=-3, extend=-1 one long
+    # gap should be preferred over several short ones.
+    seqA, seqB = "GATTACA", "GCA"
+    M, X, Y, tM, tX, tY, score = affine_align(seqA, seqB, 1)
+    print_dynamic(seqA, seqB, M)
+    print('\n'.join(format_affine_alignment(seqA, seqB, M, X, Y, tM, tX, tY)))
+    print(f"Affine global score: {score}")   # expected 3.0: G,C,A matched (+9), one gap of 4 (-3-1-1-1)
